@@ -20,7 +20,7 @@ class EOM:
         """
         self.mass = mass
         self.inertiaMatrix = inertiaMatrix
-        self.g = g
+        self.g = -g
 
     def compute_translational_acceleration(self, X: float, Y: float, Z: float, A_BI: floatMatrix, u: float, v: float, w: float, p: float, q: float, r: float) -> floatMatrix:
         """
