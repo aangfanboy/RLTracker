@@ -53,6 +53,7 @@ class FlightLogger:
             os.makedirs(self.tb_logdir, exist_ok=True)
             # create a TF summary writer
             self.tf_writer = tf.summary.create_file_writer(self.tb_logdir)
+            self.general_tf_writer = tf.summary.create_file_writer(os.path.join(origin, "general_tensorboard"))
 
             # Wrapper to provide add_text/add_scalar/add_histogram and flush/close
             class _TFWrapper:
@@ -99,6 +100,7 @@ class FlightLogger:
                         pass
 
             self.tb_writer = _TFWrapper(tf, self.tf_writer)
+            self.general_tb_writer = _TFWrapper(tf, self.general_tf_writer)
             # write initial info about the run (no CSV/TXT files; map and TB path)
             try:
                 self.tb_writer.add_text('flight/info', (
@@ -117,6 +119,17 @@ class FlightLogger:
         # counters used for tensorboard step indices
         self.iFlightLog = 0
         self.iCommandsLog = 0
+
+    def addReward(self, timeFloat: float, reward: float, totalReward: float):
+        if self.general_tb_writer is not None:
+            try:
+                step = int(self.iFlightLog)
+                if hasattr(self.general_tb_writer, 'add_scalar'):
+                    self.general_tb_writer.add_scalar('reward/step_reward', float(reward), step)
+                    self.general_tb_writer.add_scalar('reward/total_reward', float(totalReward), step)
+                    self.general_tb_writer.add_scalar('reward/time', float(timeFloat), step)
+            except Exception:
+                pass
 
     def flightLog(self, timeFloat: float, position: floatMatrix, velocity: floatMatrix, orientation: floatMatrix, angular_velocity: floatMatrix, target_position: floatMatrix, target_velocity: floatMatrix):
         # increment counter (used as tensorboard step)

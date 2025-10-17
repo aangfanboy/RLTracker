@@ -71,6 +71,35 @@ def resetTargetAndMissile():
     enviroment.quaternion_queue.put(missile.quaternions)
     enviroment.point_coordinate = missile.position.flatten()
 
+def giveReward(missilePosition: floatMatrix, targetPosition: floatMatrix, missileVelocity: floatMatrix, action: floatMatrix, collision: bool, outOfArea: bool, targetHit: bool, counterExceed: bool) -> float:
+    distance: float = np.linalg.norm(missilePosition - targetPosition) / enviroment.map.shape[0]
+    speed: float = np.linalg.norm(missileVelocity) / 10.0
+    acceleration: float = np.linalg.norm(action) / 10000.0
+
+    reward: float = -abs(distance) - abs(speed) * 0.1  # Reward closer distance and higher speed
+
+    if np.sign(missileVelocity[0,0]) != np.sign(targetPosition[0,0] - missilePosition[0,0]):
+        reward -= abs(missileVelocity[0,0])   # Penalty for moving away from target
+
+    if np.sign(missileVelocity[1,0]) != np.sign(targetPosition[1,0] - missilePosition[1,0]):
+        reward -= abs(missileVelocity[1,0]) * 0.1  # Penalty for moving away from target
+
+    if np.sign(missileVelocity[2,0]) != np.sign(targetPosition[2,0] - missilePosition[2,0]):
+        reward -= abs(missileVelocity[2,0]) * 0.1  # Penalty for moving away from target
+
+    reward -= abs(acceleration) * 0.1  # Small penalty for high acceleration to encourage efficiency
+
+    if collision:
+        reward -= 5.0  # Penalty for avoiding collision
+    if outOfArea:
+        reward -= 5.0  # Penalty for going out of bounds
+    if targetHit:
+        reward += 15.0  # Reward for hitting the target
+    if counterExceed:
+        reward -= 5.0  # Penalty for exceeding max steps
+
+    return reward
+
 def mainLoop(stepCounter: int = 0):
     dt = 0.5  # Time step for simulation
 
@@ -124,37 +153,37 @@ def mainLoop(stepCounter: int = 0):
             (missile.position.flatten()[0].reshape(-1) - target.position.flatten()[0].reshape(-1)) / enviroment.map.shape[0],  # target x position
         )).reshape(-1)
 
-        print("State:", state)
+        #collision: bool = enviroment.check_collision_with_terrain(missile.position)
+        outOfArea: bool = not enviroment.check_in_bounds(missile.position)
+        targetHit: bool = enviroment.check_collision_with_target(15.0)
+        counterExceed: bool = internalCounter > 150
 
-        reward: float = -abs(missile.position[0,0] - target.position[0,0]) / enviroment.map.shape[0]  # Negative distance reward
-
-        if enviroment.check_collision_with_target(10.0):
+        if targetHit:
             flightLogger.writeInfo("Target hit, exiting round")
-            reward += 10
             done = True
 
-        if not enviroment.check_in_bounds(missile.position):
+        if outOfArea:
             flightLogger.writeInfo("Missile out of bounds, exiting round")
-            reward -= 10
             done = True
 
-        if internalCounter > 150:
+        if counterExceed:
             flightLogger.writeInfo("Max steps reached, exiting round")
             done = True
 
-        """
-        if enviroment.check_collision_with_terrain(missile.position):
-            flightLogger.writeInfo("Missile collided, exiting round")
-            reward -= 1000.0
-            done = True
-        """ # Terrain collision disabled for simplicity
+        reward: float = giveReward(missile.position, target.position, missile.velocity, translationalForceCommand, False, outOfArea, targetHit, counterExceed)
+        totalReward += reward
+
+        if stepCounter % 10 == 0 or done:
+            print(f"[{stepCounter}][{internalCounter}]State: {state}, Action: {action}, Reward: {reward:.2f}, Total Reward: {totalReward:.2f}")
+
+        #if collision:
+        #    flightLogger.writeInfo("Collision with terrain, exiting round")
+        #    done = True
 
         dqnAgent.remember(state, action, reward, nextState, done)
         dqnAgent.learn()
         stepCounter += 1
         internalCounter += 1
-
-        totalReward += reward
 
     print(f"Round finished with total reward: {totalReward:.2f}")
 
