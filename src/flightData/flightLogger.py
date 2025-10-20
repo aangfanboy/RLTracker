@@ -25,11 +25,13 @@ except Exception:
 
 
 class FlightLogger:
-    def reset(self, unique_name: str, map: floatMatrix) -> None:
+    CREATED: bool = False
+
+    def reset(self, unique_name: str, run_id: int, map: floatMatrix) -> None:
         # Close any existing loggers
         self.exit()
         # Re-initialize
-        self.__init__(unique_name, map)
+        self.__init__(unique_name, run_id, map)
 
     def deleteLastFlightLog(self) -> None:
         # remove directory and all contents
@@ -38,8 +40,8 @@ class FlightLogger:
         except Exception:
             print(f"Failed to delete flight log directory {self.origin}")
 
-    def __init__(self, unique_name: str, map: floatMatrix):
-        origin = f"flightData/{unique_name}_{int(datetime.now().timestamp()*1e3)}"
+    def __init__(self, unique_name: str, run_id: int, map: floatMatrix) -> None:
+        origin = f"flightData/{unique_name}/run_{run_id}"
         os.makedirs(origin, exist_ok=True)
         self.origin = origin
         self.map_file = os.path.join(origin, "environment_map.npy")
@@ -53,7 +55,11 @@ class FlightLogger:
             os.makedirs(self.tb_logdir, exist_ok=True)
             # create a TF summary writer
             self.tf_writer = tf.summary.create_file_writer(self.tb_logdir)
-            self.general_tf_writer = tf.summary.create_file_writer(os.path.join(origin, "general_tensorboard"))
+
+            if not self.CREATED:
+                self.general_tf_writer = tf.summary.create_file_writer(f"flightData/{unique_name}/general_tensorboard")
+                self.CREATED = True
+                print(f"Created general TensorBoard log at flightData/{unique_name}/general_tensorboard")
 
             # Wrapper to provide add_text/add_scalar/add_histogram and flush/close
             class _TFWrapper:
@@ -118,16 +124,19 @@ class FlightLogger:
 
         # counters used for tensorboard step indices
         self.iFlightLog = 0
+        self.iLossLog = 0
         self.iCommandsLog = 0
 
-    def addReward(self, timeFloat: float, reward: float, totalReward: float):
+    def addReward(self, timeFloat: float, reward: float, averageReward: float = 0.0, averageCriticLoss: float = 0.0, averageActorLoss: float = 0.0, averageTemperatureLoss: float = 0.0):
         if self.general_tb_writer is not None:
             try:
                 step = int(self.iFlightLog)
                 if hasattr(self.general_tb_writer, 'add_scalar'):
-                    self.general_tb_writer.add_scalar('reward/step_reward', float(reward), step)
-                    self.general_tb_writer.add_scalar('reward/total_reward', float(totalReward), step)
-                    self.general_tb_writer.add_scalar('reward/time', float(timeFloat), step)
+                    self.general_tb_writer.add_scalar('reward/step_reward', float(reward), timeFloat)
+                    self.general_tb_writer.add_scalar('reward/average_reward', float(averageReward), timeFloat)
+                    self.general_tb_writer.add_scalar('loss/average_critic_loss', float(averageCriticLoss), timeFloat)
+                    self.general_tb_writer.add_scalar('loss/average_actor_loss', float(averageActorLoss), timeFloat)
+                    self.general_tb_writer.add_scalar('loss/average_temperature_loss', float(averageTemperatureLoss), timeFloat)
             except Exception:
                 pass
 
@@ -173,6 +182,23 @@ class FlightLogger:
                 _log_array('flight/target_velocity', target_velocity)
             except Exception:
                 # Don't let TB logging break main flow
+                pass
+
+    def lossLog(self, timeFloat: float, actorLoss: float, criticLoss1: float, criticLoss2: float, temperatureLoss: float):
+        # increment counter (used as tensorboard step)
+        self.iLossLog += 1
+
+        # Log losses to TensorBoard
+        if self.tb_writer is not None:
+            try:
+                step = int(self.iFlightLog)
+                if hasattr(self.tb_writer, 'add_scalar'):
+                    self.tb_writer.add_scalar('loss/time', float(timeFloat), step)
+                    self.tb_writer.add_scalar('loss/actor_loss', float(actorLoss), step)
+                    self.tb_writer.add_scalar('loss/critic_loss1', float(criticLoss1), step)
+                    self.tb_writer.add_scalar('loss/critic_loss2', float(criticLoss2), step)
+                    self.tb_writer.add_scalar('loss/temperature_loss', float(temperatureLoss), step)
+            except Exception:
                 pass
 
     def commandLog(self, timeFloat: float, X: float, Y: float, Z: float, L: float, M: float, N: float, action1: float = 0.0, action2: float = 0.0, action3: float = 0.0):
