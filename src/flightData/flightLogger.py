@@ -127,7 +127,7 @@ class FlightLogger:
         self.iLossLog = 0
         self.iCommandsLog = 0
 
-    def addReward(self, timeFloat: float, reward: float, averageReward: float = 0.0, averageCriticLoss: float = 0.0, averageActorLoss: float = 0.0, averageTemperatureLoss: float = 0.0):
+    def addReward(self, timeFloat: float, reward: float, averageReward: float = 0.0, averageCriticLoss: float = 0.0, averageActorLoss: float = 0.0, averageTemperatureLoss: float = 0.0, averageTemperature: float = 0.0, n_bounced: int = 0, discountedSum: float = 0.0):
         if self.general_tb_writer is not None:
             try:
                 step = int(self.iFlightLog)
@@ -137,6 +137,9 @@ class FlightLogger:
                     self.general_tb_writer.add_scalar('loss/average_critic_loss', float(averageCriticLoss), timeFloat)
                     self.general_tb_writer.add_scalar('loss/average_actor_loss', float(averageActorLoss), timeFloat)
                     self.general_tb_writer.add_scalar('loss/average_temperature_loss', float(averageTemperatureLoss), timeFloat)
+                    self.general_tb_writer.add_scalar('loss/average_temperature', float(averageTemperature), timeFloat)
+                    self.general_tb_writer.add_scalar('loss/number_bounced', float(n_bounced), timeFloat)
+                    self.general_tb_writer.add_scalar('reward/discounted_sum', float(discountedSum), timeFloat)
             except Exception:
                 pass
 

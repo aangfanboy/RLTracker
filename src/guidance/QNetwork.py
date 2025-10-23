@@ -1,6 +1,13 @@
+from typing import Sequence
+import random
 import numpy as np
+from matplotlib import pyplot as plt
+import pandas as pd
 import tensorflow as tf
+from tensorflow.keras import Model, Sequential
+from tensorflow.keras.layers import Dense
 import tensorflow_probability as tfp
+from collections import deque
 
 import os
 import sys
@@ -13,53 +20,76 @@ if __name__ == "__main__":
 
 from utils.math import floatMatrix
 
-class ReplayBuffer:
-    """
-    An efficient Replay Buffer for off-policy RL algorithms like SAC.
-    Implemented as a circular buffer using NumPy arrays.
-    """
-    def __init__(self, max_size: int, input_shape: int, n_actions: int):
-        self.mem_size = max_size
-        self.mem_cntr = 0  # Memory counter
+class ReplayBuffer(object):
+    def __init__(self, buffer_size: int) -> None:
+        self.buffer_size: int = buffer_size
+        self.num_experiences: int = 0
+        self.buffer: deque = deque()
 
-        # Pre-allocate memory for transitions
-        self.state_memory = np.zeros((self.mem_size, input_shape), dtype=np.float32)
-        self.new_state_memory = np.zeros((self.mem_size, input_shape), dtype=np.float32)
-        self.action_memory = np.zeros((self.mem_size, n_actions), dtype=np.float32)
-        self.reward_memory = np.zeros(self.mem_size, dtype=np.float32)
-        # Use bool for terminal flags to save memory
-        self.terminal_memory = np.zeros(self.mem_size, dtype=np.bool_)
-
-    def store_transition(self, state: floatMatrix, action: floatMatrix, reward: float, new_state: floatMatrix, done: bool):
-        """Stores a new experience in the buffer."""
-        # Find the first available index using the modulo operator
-        index = self.mem_cntr % self.mem_size
-
-        self.state_memory[index] = state
-        self.new_state_memory[index] = new_state
-        self.action_memory[index] = action
-        self.reward_memory[index] = reward
-        self.terminal_memory[index] = done
-
-        self.mem_cntr += 1
-
-    def sample_buffer(self, batch_size: int):
-        """Samples a batch of experiences from the buffer."""
-        # Determine the current number of stored transitions
-        max_mem = min(self.mem_cntr, self.mem_size)
-
-        # Generate a batch of random, unique indices
-        batch = np.random.choice(max_mem, batch_size, replace=False)
-
-        # Retrieve the data at the sampled indices (fast vectorized operation)
-        states = self.state_memory[batch]
-        new_states = self.new_state_memory[batch]
-        actions = self.action_memory[batch]
-        rewards = self.reward_memory[batch]
-        dones = self.terminal_memory[batch]
+    def get_batch(self, batch_size: int) -> dict:
+        # Randomly sample batch_size examples
+        experiences = random.sample(self.buffer, batch_size)
+        states = np.asarray([exp[0] for exp in experiences], np.float32).reshape(batch_size, -1)
+        actions = np.asarray([exp[1] for exp in experiences], np.float32).reshape(batch_size, -1)
+        rewards = np.asarray([exp[2] for exp in experiences], np.float32).reshape(batch_size, -1)
+        new_states = np.asarray([exp[3] for exp in experiences], np.float32).reshape(batch_size, -1)
+        dones = np.asarray([exp[4] for exp in experiences], np.float32).reshape(batch_size, -1)
 
         return states, actions, rewards, new_states, dones
-    
+
+    def add(self, state: np.ndarray, action: np.ndarray, reward: float, new_state: np.ndarray, done: bool):
+        experience = (state, action, reward, new_state, done)
+        if self.num_experiences < self.buffer_size:
+            self.buffer.append(experience)
+            self.num_experiences += 1
+        else:
+            self.buffer.popleft()
+            self.buffer.append(experience)
+
+    @property
+    def size(self) -> int:
+        return self.buffer_size
+
+    @property
+    def n_entries(self) -> int:
+        # If buffer is full, return buffer size
+        # Otherwise, return experience counter
+        return self.num_experiences
+
+    def erase(self):
+        self.buffer = deque()
+        self.num_experiences = 0
+
+class PolicyNetwork(tf.keras.Model):
+    def __init__(self, trainingName: str, modelName: str, n_actions: int, log_std_min: float = -20, log_std_max: float = 2, learningRate: float = 0.0003, actionScale: float = 1.0):
+        super(PolicyNetwork, self).__init__(name=modelName)
+        self.trainingName = trainingName
+        self.modelName = modelName
+        self.n_actions = n_actions
+        self.log_std_min = log_std_min
+        self.log_std_max = log_std_max
+        self.actionScale = actionScale
+
+        self.optimizer: tf.keras.optimizers.Optimizer = tf.keras.optimizers.Adam(learning_rate=learningRate) # type: ignore
+
+        self.fc1 = tf.keras.layers.Dense(256, activation='relu')
+        self.fc2 = tf.keras.layers.Dense(256, activation='relu')
+        self.mu = tf.keras.layers.Dense(n_actions, activation=None)
+        self.log_std = tf.keras.layers.Dense(n_actions, activation=None)
+
+    def call(self, state: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
+        x = self.fc1(state)
+        x = self.fc2(x)
+        mean = self.mu(x)
+        log_std = self.log_std(x)
+        log_std_clipped = tf.clip_by_value(log_std, -20, 2)
+        normal_dist = tfp.distributions.Normal(mean, tf.exp(log_std_clipped))
+        action = tf.stop_gradient(normal_dist.sample())
+        squashed_actions = tf.tanh(action)
+        logprob = normal_dist.log_prob(action) - tf.math.log(1.0 - tf.pow(squashed_actions, 2) + 1e-6)
+        logprob = tf.reduce_sum(logprob, axis=-1, keepdims=True)
+        return squashed_actions * self.actionScale, logprob
+
 class QCriticNetwork(tf.keras.Model):
     def __init__(self, trainingName: str, modelName: str, learningRate: float = 0.0003):
         super(QCriticNetwork, self).__init__(name=modelName)
@@ -81,53 +111,9 @@ class QCriticNetwork(tf.keras.Model):
         q_value = self.q(x)
 
         return q_value
-    
-class PolicyNetwork(tf.keras.Model):
-    def __init__(self, trainingName: str, modelName: str, n_actions: int, log_std_min: float = -20, log_std_max: float = 2, learningRate: float = 0.0003):
-        super(PolicyNetwork, self).__init__(name=modelName)
-        self.trainingName = trainingName
-        self.modelName = modelName
-        self.n_actions = n_actions
-        self.log_std_min = log_std_min
-        self.log_std_max = log_std_max
 
-        self.optimizer: tf.keras.optimizers.Optimizer = tf.keras.optimizers.Adam(learning_rate=learningRate) # type: ignore
 
-        self.fc1 = tf.keras.layers.Dense(256, activation='relu')
-        self.fc2 = tf.keras.layers.Dense(256, activation='relu')
-        self.mu = tf.keras.layers.Dense(n_actions, activation=None)
-        self.log_std = tf.keras.layers.Dense(n_actions, activation=None)
-
-    def call(self, state: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
-        x = self.fc1(state)
-        x = self.fc2(x)
-        mu = self.mu(x)
-        log_std = self.log_std(x)
-
-        log_std: tf.Tensor = tf.clip_by_value(log_std, self.log_std_min, self.log_std_max)  # type: ignore # Limit log_std to reasonable values
-        std: tf.Tensor = tf.exp(log_std) # type: ignore
-
-        return mu, std # type: ignore
-    
-    def sample_action(self, state: tf.Tensor, training: bool = True) -> tuple[tf.Tensor, tf.Tensor]:
-        mu, std = self(state)
-        # Create Gaussian distribution
-        dist = tfp.distributions.Normal(loc=mu, scale=std)
-
-        # Sample action using reparameterization
-        if training:
-            epsilon = tf.random.normal(shape=mu.shape)
-            action = tf.add(mu, tf.multiply(std, epsilon))
-        else:
-            action = mu
-
-        action_tanh = tf.tanh(action)
-
-        log_prob = tf.reduce_sum(dist.log_prob(action) - tf.math.log(1 - action_tanh**2 + 1e-6), axis=1)
-
-        return action_tanh, log_prob
-        
-class Agent(tf.Module):
+class Agent:
     def saveModels(self, path: str):
         """Saves the models to the specified path."""
         os.makedirs(path, exist_ok=True)
@@ -148,8 +134,8 @@ class Agent(tf.Module):
         with open(os.path.join(path, f"{self.trainingName}_temperature.txt"), 'r') as f:
             temp_value = float(f.read())
             self.log_alpha.assign(tf.convert_to_tensor(temp_value))
-
-    def __init__(self, trainingName: str, stateDims: int, nActions: int, gamma: float, learningRate: float = 0.0003, tau: float = 0.005, batchSize: int = 256, minBufferSize: int = 1000):
+            
+    def __init__(self, trainingName: str, stateDims: int, nActions: int, gamma: float, learningRate: float = 0.0003, tau: float = 0.005, batchSize: int = 256, minBufferSize: int = 1000, actionScale: float = 1.0, temperature: float = 0.2):
         self.trainingName = trainingName
         self.stateDims = stateDims
         self.nActions = nActions
@@ -157,27 +143,31 @@ class Agent(tf.Module):
         self.learningRate = learningRate
         self.tau = tau
         self.batchSize = batchSize
+        self.actionScale = actionScale
         self.minBufferSize = max(minBufferSize, batchSize)
 
-        self.log_alpha = tf.Variable(tf.convert_to_tensor(-8.111), dtype=tf.float32)  # Log temperature parameter
-        self.targetEntropy = -nActions  # Target entropy for automatic temperature tuning
+        self.replay_buffer = ReplayBuffer(self.minBufferSize)
 
-        self.replayBuffer = ReplayBuffer(max_size=1000000, input_shape=stateDims, n_actions=nActions)
+        self.log_alpha = tf.Variable(tf.convert_to_tensor(tf.math.log(temperature)), dtype=tf.float32)  # type: ignore
+        self.targetEntropy = -nActions  # Target entropy for automatic temperature tuning
 
         self.optimizer: tf.keras.optimizers.Optimizer = tf.keras.optimizers.Adam(learning_rate=self.learningRate) # type: ignore
 
         self.criticModel1 = QCriticNetwork(trainingName, "Critic1", learningRate=self.learningRate)
         self.criticModel2 = QCriticNetwork(trainingName, "Critic2", learningRate=self.learningRate)
 
-        self.targetCriticModel1 = QCriticNetwork(trainingName, "Trget_critic1", learningRate=-1.0)
+        self.targetCriticModel1 = QCriticNetwork(trainingName, "Target_critic1", learningRate=-1.0)
         self.targetCriticModel2 = QCriticNetwork(trainingName, "Target_critic2", learningRate=-1.0)
+
+        input1 = tf.keras.Input(shape=(stateDims + nActions,), dtype=tf.float32)
+        self.criticModel1(input1)
+        self.targetCriticModel1(input1)
+        self.criticModel2(input1)
+        self.targetCriticModel2(input1)
 
         self.updateTargetNetworks(tau=1.0)  # Hard update at the beginning
 
-        self.policyModel = PolicyNetwork(trainingName, "Policy", nActions, learningRate=self.learningRate)
-
-    def addToReplayBuffer(self, state: floatMatrix, action: floatMatrix, reward: float, new_state: floatMatrix, done: bool):
-        self.replayBuffer.store_transition(state, action, reward, new_state, done)
+        self.policyModel = PolicyNetwork(trainingName, "Policy", nActions, learningRate=self.learningRate, actionScale=self.actionScale)
 
     def getTemperature(self) -> tf.Tensor:
         return tf.exp(self.log_alpha) # type: ignore
@@ -204,7 +194,7 @@ class Agent(tf.Module):
             current_q2 = self.criticModel2(state_action)
 
             # Compute action from the policy for the successor state
-            next_action, log_probabilities = self.policyModel.sample_action(new_state, training=True)
+            next_action, log_probabilities = self.policyModel(new_state)
             next_state_action = tf.concat([new_state, next_action], axis=1)
 
             # Compute target Q-values using target networks
@@ -229,14 +219,16 @@ class Agent(tf.Module):
         del tape
 
         with tf.GradientTape() as tape:
-            new_action, log_probabilities = self.policyModel.sample_action(state)
+            new_action, log_probabilities = self.policyModel(state)
             state_new_action = tf.concat([state, new_action], axis=1)
 
             q1_new_policy = self.criticModel1(state_new_action)
             q2_new_policy = self.criticModel2(state_new_action)
             q_new_policy = tf.minimum(q1_new_policy, q2_new_policy)
 
-            actor_loss = tf.reduce_mean(self.getTemperature() * log_probabilities - q_new_policy)
+            # actor_loss = tf.reduce_mean(self.getTemperature() * log_probabilities - q_new_policy)
+            advantage = tf.stop_gradient(log_probabilities - q_new_policy)
+            actor_loss = tf.reduce_mean(log_probabilities * advantage)
 
         # Compute gradients and update policy network
         actor_grad = tape.gradient(actor_loss, self.policyModel.trainable_variables)
@@ -244,7 +236,7 @@ class Agent(tf.Module):
 
         with tf.GradientTape() as tape:
             # Temperature loss for automatic entropy tuning
-            new_action, log_probabilities = self.policyModel.sample_action(state)
+            new_action, log_probabilities = self.policyModel(state)
             temperature_loss = tf.reduce_mean(-self.getTemperature() * (log_probabilities + self.targetEntropy))
 
         temperature_grad = tape.gradient(temperature_loss, [self.log_alpha])
@@ -252,28 +244,23 @@ class Agent(tf.Module):
 
         return critic_loss1, critic_loss2, actor_loss, temperature_loss
     
-    def choose_action(self, observation: floatMatrix) -> tf.Tensor:
-        state = tf.convert_to_tensor([observation], dtype=tf.float32)
-        action, _ = self.policyModel.sample_action(state, training=False)
+    def choose_action(self, state: floatMatrix) -> tf.Tensor:
+        action, _ = self.policyModel(state.reshape(1, -1).astype(np.float32))
 
         return action
+    
+    def addToReplayBuffer(self, state: floatMatrix, action: floatMatrix, reward: float, new_state: floatMatrix, done: bool):
+        self.replay_buffer.add(state, action, reward, new_state, done)
 
-    def train(self) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor] | None:
-        if self.replayBuffer.mem_cntr < self.minBufferSize:
-            return None
-        
-        states, actions, rewards, new_states, dones = self.replayBuffer.sample_buffer(self.batchSize)
+    def train(self) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor] | None:
+        if self.replay_buffer.n_entries < self.minBufferSize:
+            return 0.0, 0.0, 0.0, 0.0, self.getTemperature()
 
-        # Convert to tensors
-        states = tf.convert_to_tensor(states, dtype=tf.float32)
-        actions = tf.convert_to_tensor(actions, dtype=tf.float32)
-        rewards = tf.convert_to_tensor(rewards, dtype=tf.float32)
-        new_states = tf.convert_to_tensor(new_states, dtype=tf.float32)
-        dones = tf.convert_to_tensor(dones, dtype=tf.float32)
-        
+        states, actions, rewards, new_states, dones = self.replay_buffer.get_batch(self.batchSize)
+
         critic_loss1, critic_loss2, actor_loss, temperature_loss = self.train_step(states, actions, rewards, new_states, dones)
 
         # Soft update target networks
         self.updateTargetNetworks(self.tau, clipTemp=True)
 
-        return critic_loss1, critic_loss2, actor_loss, temperature_loss
+        return critic_loss1.numpy(), critic_loss2.numpy(), actor_loss.numpy(), temperature_loss.numpy(), self.getTemperature()

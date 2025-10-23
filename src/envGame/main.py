@@ -17,16 +17,44 @@ class Enviroment:
     def resetMap(self):
         self.map = self.create_3D_map(self.map.shape[0], self.map.shape[1], numMountains=self.numMountains, maxHeight=self.maxHeight)
 
-    def __init__(self, xDim: int, yDim: int, numMountains: int = 10, maxHeight: int = 300, missile: Missile = None, target: Target = None):
+    def __init__(self, xDim: int, yDim: int, numMountains: int = 10, maxHeight: int = 300, missile: Missile = None, target: Target = None, maxAllowableHeight: int = 1000):
         self.missile = missile
         self.target = target
         self.numMountains = numMountains
         self.maxHeight = maxHeight
+        self.maxAllowableHeight = maxAllowableHeight
         self.quaternion: floatMatrix = self.missile.quaternions
 
         self.map: floatMatrix = self.create_3D_map(xDim, yDim, numMountains=numMountains, maxHeight=maxHeight)
         self.point_coordinate: floatMatrix = self.missile.position
         self.target_coordinate: floatMatrix = self.target.position
+
+    def put_inside_bounds(self) -> tuple[bool, float, float, float]:
+        coordinate: floatMatrix = self.missile.position
+        isInside: bool = self.check_in_bounds(coordinate)
+        if isInside:
+            return False, 1, 1, 1  # No adjustment needed
+
+        outsideX = 1
+        outsideY = 1
+        outsideZ = 1
+        
+        x, y, z = coordinate.flatten()
+        xp = np.clip(x, 1, self.map.shape[0] - 1)
+        yp = np.clip(y, 1, self.map.shape[1] - 1)
+        zp = max(z, self.maxAllowableHeight)
+        
+        if x != xp: outsideX = -.01
+        if y != yp: outsideY = -.01
+        if z != zp: outsideZ = -.01
+
+        self.missile.position = np.array([[xp], [yp], [zp]])
+        self.missile.velocity = np.array([[self.missile.velocity[0, 0] * outsideX],
+                                          [self.missile.velocity[1, 0] * outsideY],
+                                          [self.missile.velocity[2, 0] * outsideZ]])
+        
+        return True, outsideX, outsideY, outsideZ
+        
 
     def check_in_bounds(self, coordinate: floatMatrix) -> bool:
         x, y, z = coordinate.flatten()
