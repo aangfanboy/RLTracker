@@ -36,6 +36,16 @@ action-space definition:
 
 """
 
+PENALTY_DISTANCE_FACTOR: float = 1.0
+PENALTY_VELOCITY_FACTOR: float = 0.5
+PENALTY_ACTION_FACTOR: float = 0.01
+PENALTY_COLLISION: float = 100.0
+PENALTY_OUT_OF_AREA: float = 50.0
+REWARD_TARGET_HIT: float = 200.0
+REWARD_DISTANCE_BONUS_FACTOR: float = 50.0
+PENALTY_COUNTER_EXCEED: float = 10.0
+PENALTY_BOUNCE: float = 5.0
+
 def getRandomInitCoordinates(minValue: float, maxValue: float, minHeight: float = 200.0, maxHeight: float = 400.0) -> floatMatrix:
     x = np.random.uniform(minValue, maxValue)
     y = np.random.uniform(minValue, maxValue)
@@ -81,7 +91,7 @@ def giveReward(
     targetHit: bool,
     counterExceed: bool,
     isBounced: bool,
-    outsideZ: int
+    rewardScale: float = 1.0,
 ) -> float:
     """
     Improved reward for 2D missile tracking (static target).
@@ -94,39 +104,49 @@ def giveReward(
     
     # --- Distance and direction ---
     direction_to_target = targetPosition - missilePosition
-    distance = np.linalg.norm(direction_to_target) + 1e-6
+    distance = np.linalg.norm(direction_to_target) + 1e-9
     direction_unit = direction_to_target / distance
-    distanceScaled = distance / 1000.0  # scale distance for reward calculation
+    distanceNorm = distance / 1414.21356  # normalize using max distance in the environment (~1414.21 for 1000x1000x1000), [0, 1]
 
     # --- Velocity alignment (cosine similarity) ---
-    vel_norm = np.linalg.norm(missileVelocity) + 1e-6
+    vel_norm = np.linalg.norm(missileVelocity) + 1e-9
     velocity_alignment = float(np.dot(missileVelocity.T, direction_unit) / vel_norm)  # [-1, +1]
+    velocity_alignment = min(velocity_alignment, 0.0)
 
     # --- Acceleration alignment (cosine similarity) ---
-    acc_norm = np.linalg.norm(action) / 100.0  # normalize using your action scale
-    if np.linalg.norm(action) > 1e-6:
+    if np.linalg.norm(action) > 1e-9:
         accel_alignment = float(np.dot(action.T, direction_unit) / np.linalg.norm(action))  # [-1, +1]
+        accel_alignment = min(accel_alignment, 0.0)
     else:
         accel_alignment = 0.0
 
-    # --- Reward terms ---
-    reward: float = 0.0
-    # reward += velocity_alignment * 5    # reward for flying toward target
-    # reward += accel_alignment * 2       # smaller reward for thrust direction
-    # reward -= acc_norm            # penalty for large acceleration use
-    
-    # squared distance penalty and reward
-    reward += (1.0 - distanceScaled) * 10.0  # closer is better
-    reward -= distanceScaled ** 2 * 5.0      # far is worse
+    # --- Reward calculation --- ALWAYS PENALIZE, only reward on target hit
+    reward = 0.0
 
-    if collision or outOfArea or counterExceed:
-        reward -= 50.0  # large penalty for failure
+    reward -= PENALTY_DISTANCE_FACTOR * distanceNorm  # Penalize distance to target
+    reward -= PENALTY_VELOCITY_FACTOR * velocity_alignment  # Penalize velocity away from target
+    reward -= PENALTY_ACTION_FACTOR * accel_alignment  # Penalize acceleration away from target
+
+    if collision:
+        reward -= PENALTY_COLLISION  # Large penalty for collision
+
+    if outOfArea:
+        reward -= PENALTY_OUT_OF_AREA  # Penalty for going out of area
+
+    if counterExceed:
+        reward -= PENALTY_COUNTER_EXCEED  # Penalty for exceeding step counter
+
     if isBounced:
-        reward -= 20.0
-    if targetHit:
-        reward += 100.0  # large bonus for success
+        reward -= PENALTY_BOUNCE  # Penalty for bouncing
 
-    return reward
+    if targetHit:
+        reward += REWARD_TARGET_HIT  # Reward for hitting the target
+
+    if outOfArea or collision or counterExceed or targetHit:
+        # additional reward depending on the distance at termination, non-linear scaling
+        reward += REWARD_DISTANCE_BONUS_FACTOR * np.exp(-5.0 * distanceNorm)
+
+    return reward * rewardScale
 
 def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
     dt = 0.2  # Time step for simulation
@@ -233,7 +253,7 @@ def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
             targetHit=targetHit,
             counterExceed=counterExceed,
             isBounced=isBounced,
-            outsideZ=outsideZ
+            rewardScale=1.0,
         )
         totalReward += reward
         discountedSum += reward * (rlAgent.gamma ** internalCounter)
@@ -303,7 +323,7 @@ if __name__ == "__main__":
 
     flightLogger = FlightLogger(unique_name=trainingName, run_id=runCounter, map=enviroment.map)
 
-    rlAgent = Agent(trainingName=trainingName, stateDims=9, nActions=3, gamma=0.99, learningRate=0.0003, tau=0.005, batchSize=512, minBufferSize=5000, actionScale=100.0, temperature=1.0)
+    rlAgent = Agent(trainingName=trainingName, stateDims=9, nActions=3, gamma=0.9999, learningRate=0.0003, tau=0.007, batchSize=512, minBufferSize=5000, actionScale=100.0, temperature=1.0)
 
     batching: bool = True
     while runCounter < numEpisodes:
