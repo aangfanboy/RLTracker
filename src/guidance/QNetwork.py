@@ -1,11 +1,6 @@
-from typing import Sequence
 import random
 import numpy as np
-from matplotlib import pyplot as plt
-import pandas as pd
 import tensorflow as tf
-from tensorflow.keras import Model, Sequential
-from tensorflow.keras.layers import Dense
 import tensorflow_probability as tfp
 from collections import deque
 
@@ -84,11 +79,13 @@ class PolicyNetwork(tf.keras.Model):
         log_std = self.log_std(x)
         log_std_clipped = tf.clip_by_value(log_std, -20, 2)
         normal_dist = tfp.distributions.Normal(mean, tf.exp(log_std_clipped))
-        action = tf.stop_gradient(normal_dist.sample())
+        action = normal_dist.sample()
         squashed_actions = tf.tanh(action)
         logprob = normal_dist.log_prob(action) - tf.math.log(1.0 - tf.pow(squashed_actions, 2) + 1e-6)
         logprob = tf.reduce_sum(logprob, axis=-1, keepdims=True)
-        return squashed_actions * self.actionScale, logprob
+
+        evalAction = tf.tanh(mean) * self.actionScale
+        return squashed_actions * self.actionScale, logprob, evalAction
 
 class QCriticNetwork(tf.keras.Model):
     def __init__(self, trainingName: str, modelName: str, learningRate: float = 0.0003):
@@ -114,7 +111,7 @@ class QCriticNetwork(tf.keras.Model):
 
 
 class Agent:
-    def saveModels(self, path: str):
+    def saveModels(self, path: str, runCounter: int):
         """Saves the models to the specified path."""
         os.makedirs(path, exist_ok=True)
 
@@ -125,6 +122,9 @@ class Agent:
         with open(os.path.join(path, f"{self.trainingName}_temperature.txt"), 'w') as f:
             f.write(str(self.log_alpha.numpy()))
 
+        with open(os.path.join(path, f"{self.trainingName}_runCounter.txt"), 'w') as f:
+            f.write(str(runCounter))
+
     def loadModels(self, path: str):
         """Loads the models from the specified path."""
         self.criticModel1.load_weights(os.path.join(path, f"{self.trainingName}_critic1.weights.h5"))
@@ -134,6 +134,18 @@ class Agent:
         with open(os.path.join(path, f"{self.trainingName}_temperature.txt"), 'r') as f:
             temp_value = float(f.read())
             self.log_alpha.assign(tf.convert_to_tensor(temp_value))
+
+            print(f"Loaded temperature: {temp_value}")
+
+        self.updateTargetNetworks(tau=1.0)  # Hard update after loading
+
+        run_counter_value: int = 0
+
+        with open(os.path.join(path, f"{self.trainingName}_runCounter.txt"), 'r') as f:
+            run_counter_value = int(f.read())
+            print(f"Loaded run counter: {run_counter_value}")
+
+        return run_counter_value
             
     def __init__(self, trainingName: str, stateDims: int, nActions: int, gamma: float, learningRate: float = 0.0003, tau: float = 0.005, batchSize: int = 256, minBufferSize: int = 1000, actionScale: float = 1.0, temperature: float = 0.2):
         self.trainingName = trainingName
@@ -169,6 +181,9 @@ class Agent:
 
         self.policyModel = PolicyNetwork(trainingName, "Policy", nActions, learningRate=self.learningRate, actionScale=self.actionScale)
 
+        input2 = tf.keras.Input(shape=(stateDims,), dtype=tf.float32)
+        self.policyModel(input2)
+
     def getTemperature(self) -> tf.Tensor:
         return tf.exp(self.log_alpha) # type: ignore
     
@@ -194,7 +209,7 @@ class Agent:
             current_q2 = self.criticModel2(state_action)
 
             # Compute action from the policy for the successor state
-            next_action, log_probabilities = self.policyModel(new_state)
+            next_action, log_probabilities, _ = self.policyModel(new_state)
             next_state_action = tf.concat([new_state, next_action], axis=1)
 
             # Compute target Q-values using target networks
@@ -206,8 +221,8 @@ class Agent:
             target_value = reward + self.gamma * (1 - done) * target_q_values
             target_value = tf.stop_gradient(target_value)
 
-            critic_loss1 = tf.reduce_mean((current_q1 - target_value) ** 2)
-            critic_loss2 = tf.reduce_mean((current_q2 - target_value) ** 2)
+            critic_loss1 = tf.reduce_mean(tf.square(current_q1 - target_value))
+            critic_loss2 = tf.reduce_mean(tf.square(current_q2 - target_value))
 
         # Compute gradients and update critic networks
         critic_grad1 = tape.gradient(critic_loss1, self.criticModel1.trainable_variables)
@@ -218,42 +233,60 @@ class Agent:
 
         del tape
 
-        with tf.GradientTape() as tape:
-            new_action, log_probabilities = self.policyModel(state)
+        with tf.GradientTape(persistent=True) as tape:
+            new_action, log_probabilities, _ = self.policyModel(state)
             state_new_action = tf.concat([state, new_action], axis=1)
 
             q1_new_policy = self.criticModel1(state_new_action)
             q2_new_policy = self.criticModel2(state_new_action)
             q_new_policy = tf.minimum(q1_new_policy, q2_new_policy)
 
-            # actor_loss = tf.reduce_mean(self.getTemperature() * log_probabilities - q_new_policy)
-            advantage = tf.stop_gradient(log_probabilities - q_new_policy)
-            actor_loss = tf.reduce_mean(log_probabilities * advantage)
+            actor_loss = tf.reduce_mean(self.getTemperature() * log_probabilities - q_new_policy)
+
+            log_probabilities_detached = tf.stop_gradient(log_probabilities)
+            temperature_loss = -tf.reduce_mean(self.getTemperature() * (log_probabilities_detached + self.targetEntropy))
 
         # Compute gradients and update policy network
         actor_grad = tape.gradient(actor_loss, self.policyModel.trainable_variables)
         self.policyModel.optimizer.apply_gradients(zip(actor_grad, self.policyModel.trainable_variables))
-
-        with tf.GradientTape() as tape:
-            # Temperature loss for automatic entropy tuning
-            new_action, log_probabilities = self.policyModel(state)
-            temperature_loss = tf.reduce_mean(-self.getTemperature() * (log_probabilities + self.targetEntropy))
-
+            
         temperature_grad = tape.gradient(temperature_loss, [self.log_alpha])
         self.optimizer.apply_gradients(zip(temperature_grad, [self.log_alpha]))
 
+        del tape
+
         return critic_loss1, critic_loss2, actor_loss, temperature_loss
     
-    def choose_action(self, state: floatMatrix) -> tf.Tensor:
-        action, _ = self.policyModel(state.reshape(1, -1).astype(np.float32))
+    @tf.function
+    def behaviorCloning_train_step(self, state: tf.Tensor, action: tf.Tensor) -> tf.Tensor:
+        with tf.GradientTape() as tape:
+            new_action, _, _ = self.policyModel(state)
+            bc_loss = tf.reduce_mean(tf.square(new_action - action))
+
+        bc_grad = tape.gradient(bc_loss, self.policyModel.trainable_variables)
+        self.policyModel.optimizer.apply_gradients(zip(bc_grad, self.policyModel.trainable_variables))
+
+        return bc_loss
+    
+    def choose_action(self, state: floatMatrix, evaluate: bool = False) -> tf.Tensor:
+        action, _, mean = self.policyModel(state.reshape(1, -1).astype(np.float32))
+
+        if evaluate:
+            return mean
 
         return action
     
     def addToReplayBuffer(self, state: floatMatrix, action: floatMatrix, reward: float, new_state: floatMatrix, done: bool):
         self.replay_buffer.add(state, action, reward, new_state, done)
 
+    def resetReplayBuffer(self):
+        self.replay_buffer.erase()
+
+    def shouldTrain(self) -> bool:
+        return self.replay_buffer.n_entries >= self.minBufferSize
+
     def train(self) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor] | None:
-        if self.replay_buffer.n_entries < self.minBufferSize:
+        if not self.shouldTrain():
             return 0.0, 0.0, 0.0, 0.0, self.getTemperature()
 
         states, actions, rewards, new_states, dones = self.replay_buffer.get_batch(self.batchSize)
@@ -264,3 +297,11 @@ class Agent:
         self.updateTargetNetworks(self.tau, clipTemp=True)
 
         return critic_loss1.numpy(), critic_loss2.numpy(), actor_loss.numpy(), temperature_loss.numpy(), self.getTemperature()
+
+    def behaviorCloningTrain(self) -> tf.Tensor:
+        if not self.shouldTrain():
+            return tf.convert_to_tensor(0.0)
+        
+        states, actions, _, _, _ = self.replay_buffer.get_batch(self.batchSize)
+
+        return self.behaviorCloning_train_step(states, actions)

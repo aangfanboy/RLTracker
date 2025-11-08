@@ -3,6 +3,19 @@ from numpy.typing import NDArray
 
 floatMatrix = NDArray[np.float64]
 
+def normalize_quaternion(quaternion: floatMatrix) -> None:
+    """
+    Normalize a quaternion in place.
+    @param quaternion: Quaternion as a floatMatrix of shape (4,1).
+    """
+
+    norm = np.linalg.norm(quaternion)
+    if norm > 0:
+        quaternion /= norm
+    else:
+        # If the norm is zero, set to a default unit quaternion
+        quaternion[:] = np.array([[0.0], [0.0], [0.0], [1.0]], dtype=np.float64)
+
 def quaternionMultiply(q1: floatMatrix, q2: floatMatrix) -> floatMatrix:
     """
     Multiply two quaternions.

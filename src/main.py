@@ -12,6 +12,7 @@ import time
 from numpy.typing import NDArray
 
 from guidance.QNetwork import Agent
+from guidance.PIDAction import PIDAction
 
 floatMatrix = NDArray[np.float64]
 
@@ -36,25 +37,27 @@ action-space definition:
 
 """
 
+PENALTY_STEP: float = 0.1
 PENALTY_DISTANCE_FACTOR: float = 1.0
-PENALTY_VELOCITY_FACTOR: float = 0.5
-PENALTY_ACTION_FACTOR: float = 0.01
-PENALTY_COLLISION: float = 100.0
-PENALTY_OUT_OF_AREA: float = 50.0
-REWARD_TARGET_HIT: float = 200.0
-REWARD_DISTANCE_BONUS_FACTOR: float = 50.0
-PENALTY_COUNTER_EXCEED: float = 10.0
-PENALTY_BOUNCE: float = 5.0
+PENALTY_VELOCITY_FACTOR: float = 0.0
+PENALTY_ACTION_FACTOR: float = 0.0
+PENALTY_COLLISION: float = 0.0
+PENALTY_OUT_OF_AREA: float = 0.0
+REWARD_TARGET_HIT: float = 1000.0
+REWARD_DISTANCE_BONUS_FACTOR: float = 0.0
+PENALTY_COUNTER_EXCEED: float = 0.0
+PENALTY_BOUNCE: float = 0.0
+REWARD_PROGRESS_FACTOR: float = 0.0
 
 def getRandomInitCoordinates(minValue: float, maxValue: float, minHeight: float = 200.0, maxHeight: float = 400.0) -> floatMatrix:
     x = np.random.uniform(minValue, maxValue)
-    y = np.random.uniform(minValue, maxValue)
-    z = np.random.uniform(minHeight, maxHeight)
+    y = 10
+    z = 10
     return np.array([[x], [y], [z]], dtype=np.float64)
 
 def getRandomInitVelocity(minValue: float, maxValue: float, zVel: float = 30.0) -> floatMatrix:
     vx = np.random.uniform(minValue, maxValue)
-    vy = np.random.uniform(minValue, maxValue)
+    vy = 0
     vz = zVel  # Fixed initial upward velocity
     return np.array([[vx], [vy], [vz]], dtype=np.float64)
 
@@ -64,7 +67,7 @@ def createInitValues():
     missileInitVelocity: floatMatrix = getRandomInitVelocity(0.0, 0.0, zVel=0.0)
     missileInitAngularVelocity: floatMatrix = np.array([[0.0], [0.0], [0.0]], dtype=np.float64)
 
-    targetInitPosition: floatMatrix = getRandomInitCoordinates(300.0, 600.0, minHeight=200.0, maxHeight=400.0)
+    targetInitPosition: floatMatrix = getRandomInitCoordinates(400.0, 400.0, minHeight=200.0, maxHeight=400.0)
     targetInitQuaternions: floatMatrix = np.array([[0.0], [0.0], [0.0], [1.0]], dtype=np.float64)  # Identity quaternion
     targetInitVelocity: floatMatrix = getRandomInitVelocity(0.0, 0.0, zVel=0.0)
     targetInitAngularVelocity: floatMatrix = np.array([[0.0], [0.0], [0.0]], dtype=np.float64)
@@ -91,8 +94,8 @@ def giveReward(
     targetHit: bool,
     counterExceed: bool,
     isBounced: bool,
-    rewardScale: float = 1.0,
-) -> float:
+    distanceBefore: float,
+) -> tuple[float, float]:
     """
     Improved reward for 2D missile tracking (static target).
 
@@ -108,10 +111,17 @@ def giveReward(
     direction_unit = direction_to_target / distance
     distanceNorm = distance / 1414.21356  # normalize using max distance in the environment (~1414.21 for 1000x1000x1000), [0, 1]
 
+    # --- Change in distance based reward component ---
+    distance_change = distanceBefore - distance  # Positive if getting closer
+    distance_change_norm = distance_change / 1414.21356  # normalize
+
     # --- Velocity alignment (cosine similarity) ---
     vel_norm = np.linalg.norm(missileVelocity) + 1e-9
     velocity_alignment = float(np.dot(missileVelocity.T, direction_unit) / vel_norm)  # [-1, +1]
     velocity_alignment = min(velocity_alignment, 0.0)
+
+    # --- Normalize action to get acceleration direction ---    
+    action_norm = np.linalg.norm(action) / 500.0 + 1e-9
 
     # --- Acceleration alignment (cosine similarity) ---
     if np.linalg.norm(action) > 1e-9:
@@ -120,9 +130,10 @@ def giveReward(
     else:
         accel_alignment = 0.0
 
-    # --- Reward calculation --- ALWAYS PENALIZE, only reward on target hit
-    reward = 0.0
+    # --- Reward calculation ---
+    reward = -PENALTY_STEP * ((action_norm + 1)** 2)  # Small step penalty scaled by action magnitude squared
 
+    reward += REWARD_PROGRESS_FACTOR * distance_change_norm  # Reward for getting closer
     reward -= PENALTY_DISTANCE_FACTOR * distanceNorm  # Penalize distance to target
     reward -= PENALTY_VELOCITY_FACTOR * velocity_alignment  # Penalize velocity away from target
     reward -= PENALTY_ACTION_FACTOR * accel_alignment  # Penalize acceleration away from target
@@ -146,9 +157,9 @@ def giveReward(
         # additional reward depending on the distance at termination, non-linear scaling
         reward += REWARD_DISTANCE_BONUS_FACTOR * np.exp(-5.0 * distanceNorm)
 
-    return reward * rewardScale
+    return reward, distance
 
-def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
+def mainLoop(stepCounter: int = 0, batching: bool = True, logEachStep: bool = True, logGeneralInfo: bool = True, useConsecutiveSteps: bool = True) -> tuple[int, bool]:
     dt = 0.2  # Time step for simulation
 
     initTime: float = time.time()
@@ -172,78 +183,94 @@ def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
     total_temperature: float = 0.0
     n_bounced: int = 0
 
+    reward: float = 0.0
+    distanceBefore: float = np.linalg.norm(target.position - missile.position) + 1e-9
+    isBounced: bool = False
+
     nextState: floatMatrix = np.concatenate((
-        missile.position.flatten().reshape(-1) / enviroment.map.shape[0],  # x,y position
-        missile.velocity.flatten().reshape(-1) / 100,  # x,y velocity
-        target.position.flatten().reshape(-1) / enviroment.map.shape[0],  # target x,y position
+        missile.position.flatten()[0].reshape(-1) / enviroment.map.shape[0],  # x position
+        missile.velocity.flatten()[0].reshape(-1) / config.MissileConfig.Constraints.MAX_VELOCITY,  # x velocity
+        # target.position.flatten()[0].reshape(-1) / enviroment.map.shape[0],  # target x position
     )).reshape(-1)
 
     discountedSum: float = 0.0
-    
+    actionSmallerOddForPID: float = 0.0 if rlAgent.shouldTrain() else 0.0
+
+    actionDecision: str = "PID" if np.random.uniform() < actionSmallerOddForPID else "RL"
+    print(f"Action decision for this episode: {actionDecision}")
+
+    if logEachStep:
+        flightLogger.writeInfo(f"Action decision for this episode: {actionDecision} (PID odds: {actionSmallerOddForPID:.2f})")
+
     while not done:
         state = nextState
 
-        action = rlAgent.choose_action(state).numpy()
-        translationalForceCommand = np.array([[action[0,0]], [action[0,1]], [action[0,2]]], dtype=np.float64)
+        if actionDecision == "PID":
+            pidAction.updateSetpoint(target.position)
+            action = pidAction.getAction(missile.position, dt).reshape(1, -1)
+        elif actionDecision == "RL":
+            action = rlAgent.choose_action(state).numpy()
+        translationalForceCommand = np.array([[action[0,0]], [0.0], [0.0]], dtype=np.float64)
 
         # Log flight data
-
         logTime: float = time.time() - initTime
-        flightLogger.flightLog(
-            timeFloat=logTime,
-            position=missile.position.flatten(),    
-            velocity=missile.velocity.flatten(),
-            orientation=missile.quaternions.flatten(),
-            angular_velocity=missile.angularVelocity.flatten(),
-            target_position=target.position.flatten(),
-            target_velocity=target.velocity.flatten()
-        )
 
-        flightLogger.commandLog(
-            timeFloat=logTime,
-            X=translationalForceCommand[0, 0],
-            Y=translationalForceCommand[1, 0],
-            Z=translationalForceCommand[2, 0],
-            L=angularMomentCommand[0, 0],
-            M=angularMomentCommand[1, 0],
-            N=angularMomentCommand[2, 0],
-        )
+        if logEachStep:
+            flightLogger.flightLog(
+                timeFloat=logTime,
+                position=missile.position.flatten(),    
+                velocity=missile.velocity.flatten(),
+                orientation=missile.quaternions.flatten(),
+                angular_velocity=missile.angularVelocity.flatten(),
+                target_position=target.position.flatten(),
+                target_velocity=target.velocity.flatten()
+            )
+
+            flightLogger.commandLog(
+                timeFloat=logTime,
+                X=translationalForceCommand[0, 0],
+                Y=translationalForceCommand[1, 0],
+                Z=translationalForceCommand[2, 0],
+                L=angularMomentCommand[0, 0],
+                M=angularMomentCommand[1, 0],
+                N=angularMomentCommand[2, 0],
+            )
 
         # Using the consecutive steps technique
-        if batching and np.random.uniform() < 0.5:
+        if useConsecutiveSteps and batching and np.random.uniform() < 0.5:
             for _ in range(4):
                 missile.update(translationalForceCommand, angularMomentCommand, dt)
 
         missile.update(translationalForceCommand, angularMomentCommand, dt)
 
         nextState: floatMatrix = np.concatenate((
-            missile.position.flatten().reshape(-1) / enviroment.map.shape[0],  # x,y position
-            missile.velocity.flatten().reshape(-1) / 100,  # x,y velocity
-            target.position.flatten().reshape(-1) / enviroment.map.shape[0],  # target x,y position
+            missile.position.flatten()[0].reshape(-1) / enviroment.map.shape[0],  # x position
+            missile.velocity.flatten()[0].reshape(-1) / config.MissileConfig.Constraints.MAX_VELOCITY,  # x velocity
+            # target.position.flatten()[0].reshape(-1) / enviroment.map.shape[0],  # target x position
         )).reshape(-1)
 
         #collision: bool = enviroment.check_collision_with_terrain(missile.position)
-        isBounced, outsideX, outsideY, outsideZ = enviroment.put_inside_bounds()
+        isBounced = enviroment.put_inside_bounds()
         outOfArea: bool = not enviroment.check_in_bounds(missile.position)
-        targetHit: bool = enviroment.check_collision_with_target(50.0, positionBefore)
+        targetHit: bool = enviroment.check_collision_with_target(10.0, positionBefore)
         counterExceed: bool = internalCounter > 2000
 
         if targetHit:
-            flightLogger.writeInfo("Target hit, exiting round")
+            flightLogger.writeInfo(f"Target hit by {actionDecision} agent!, exiting round")
             done = True
 
         if outOfArea:
-            flightLogger.writeInfo("Missile out of bounds, exiting round")
+            flightLogger.writeInfo(f"Missile out of bounds by {actionDecision} agent!, exiting round")
             done = True
 
         if counterExceed:
-            flightLogger.writeInfo("Max steps reached, exiting round")
+            flightLogger.writeInfo(f"Max steps reached by {actionDecision} agent!, exiting round")
             done = True
 
         if isBounced:
             n_bounced += 1
 
-        reward: float = giveReward(
+        reward, distanceBefore = giveReward(
             missilePosition=missile.position,
             targetPosition=target.position,
             missileVelocity=missile.velocity,
@@ -253,7 +280,7 @@ def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
             targetHit=targetHit,
             counterExceed=counterExceed,
             isBounced=isBounced,
-            rewardScale=1.0,
+            distanceBefore=distanceBefore,
         )
         totalReward += reward
         discountedSum += reward * (rlAgent.gamma ** internalCounter)
@@ -270,7 +297,7 @@ def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
         critic_loss2 = critic_loss2
         critic_loss = critic_loss1 + critic_loss2
 
-        if batching and critic_loss != 0.0:
+        if batching and rlAgent.shouldTrain():
             print("Disabling batching for this episode due to successful training step.")
             batching = False
 
@@ -279,16 +306,18 @@ def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
         total_temperature_loss += temperature_loss
         total_temperature += temperature
 
-        flightLogger.lossLog(
-            timeFloat=logTime,
-            criticLoss1=critic_loss1,
-            criticLoss2=critic_loss2,
-            actorLoss=actor_loss,
-            temperatureLoss=temperature_loss,
-        )
+        if logEachStep:
+            flightLogger.lossLog(
+                timeFloat=logTime,
+                criticLoss1=critic_loss1,
+                criticLoss2=critic_loss2,
+                actorLoss=actor_loss,
+                temperatureLoss=temperature_loss,
+                temperature=temperature,
+            )
 
         if stepCounter % 100 == 0 or done:
-            print(f"[{stepCounter}][{internalCounter}]State: {state}, Action: {action}, Reward: {reward:.2f}, Critic Loss: {critic_loss:.2f}, Actor Loss: {actor_loss:.2f}, Temp Loss: {temperature_loss:.2f}, Temperature: {temperature:.2f}, Bounced: {n_bounced}")
+            print(f"[{stepCounter}][{internalCounter}]nextState: {nextState}, Action: {action}, Reward: {reward:.2f}, Critic Loss: {critic_loss:.2f}, Actor Loss: {actor_loss:.2f}, Temp Loss: {temperature_loss:.2f}, Temperature: {temperature:.2f}, Bounced: {n_bounced}")
 
         stepCounter += 1
         internalCounter += 1
@@ -300,15 +329,24 @@ def mainLoop(stepCounter: int = 0, batching: bool = True) -> tuple[int, bool]:
     averageTemperatureLoss: float = total_temperature_loss / internalCounter if internalCounter > 0 else 0.0
     averageTemperature: float = total_temperature / internalCounter if internalCounter > 0 else 0.0
 
-    print(f"Round finished with total reward: {totalReward:.2f}, average reward: {averageReward:.2f}, average critic loss: {averageCriticLoss:.4f}, average actor loss: {averageActorLoss:.4f}, average temperature loss: {averageTemperatureLoss:.4f}, discounted sum: {discountedSum:.2f}, n_bounced: {n_bounced}")
-    flightLogger.addReward(runCounter, reward=totalReward, averageReward=averageReward, averageCriticLoss=averageCriticLoss, averageActorLoss=averageActorLoss, averageTemperatureLoss=averageTemperatureLoss, averageTemperature=averageTemperature, n_bounced=n_bounced, discountedSum=discountedSum)
+    print(f"{actionDecision} with {actionSmallerOddForPID}|| Round finished with total reward: {totalReward:.2f}, average reward: {averageReward:.2f}, average critic loss: {averageCriticLoss:.4f}, average actor loss: {averageActorLoss:.4f}, average temperature loss: {averageTemperatureLoss:.4f}, discounted sum: {discountedSum:.2f}, n_bounced: {n_bounced}")
+    
+    if logGeneralInfo:
+        flightLogger.addReward(runCounter, reward=totalReward, averageReward=averageReward, averageCriticLoss=averageCriticLoss, averageActorLoss=averageActorLoss,
+                               averageTemperatureLoss=averageTemperatureLoss, averageTemperature=averageTemperature, n_bounced=n_bounced, discountedSum=discountedSum,
+                               actionSmallerOddForPID=actionSmallerOddForPID)
+
     return stepCounter, batching
 
 if __name__ == "__main__":
     runCounter: int = 0
     stepCounter: int = 0
     numEpisodes: int = 500000
-    trainingName: str = "SACTraining3D"
+    trainingName: str = "SACTraining_1D_ConsTargetWOState_Consecitive_5000Buffer_MaxAct500_FullDamp_OnlyDistanceReward_NoBouncePenalty_BasePenalty_NoPID"
+    logEachStep: bool = False
+    logGeneralInfo: bool = True
+    loadModels: bool = False
+    useConsecutiveSteps: bool = True
 
     (missileInitPosition, missileInitQuaternions, missileInitVelocity, missileInitAngularVelocity,
      targetInitPosition, targetInitQuaternions, targetInitVelocity, targetInitAngularVelocity) = createInitValues()
@@ -321,14 +359,22 @@ if __name__ == "__main__":
 
     enviroment = Enviroment(1000, 1000, numMountains=0, maxHeight=190, missile=missile, target=target, maxAllowableHeight=1000)
 
-    flightLogger = FlightLogger(unique_name=trainingName, run_id=runCounter, map=enviroment.map)
+    if logEachStep or logGeneralInfo:
+        flightLogger = FlightLogger(unique_name=trainingName, run_id=runCounter, map=enviroment.map)
 
-    rlAgent = Agent(trainingName=trainingName, stateDims=9, nActions=3, gamma=0.9999, learningRate=0.0003, tau=0.007, batchSize=512, minBufferSize=5000, actionScale=100.0, temperature=1.0)
+    rlAgent = Agent(trainingName=trainingName, stateDims=2, nActions=1, gamma=0.99, learningRate=0.0003, tau=0.01, batchSize=512, minBufferSize=5000, actionScale=500.0, temperature=1.0)
+    pidAction = PIDAction(kp=50.1, ki=2.5, kd=100.0, setpoint=target.position)
+
+    if loadModels:
+        runCounter = rlAgent.loadModels(f"flightData/{trainingName}/models")
+        print("Models loaded.")
 
     batching: bool = True
+
     while runCounter < numEpisodes:
+
         try:
-            stepCounter, batching = mainLoop(stepCounter, batching)
+            stepCounter, batching = mainLoop(stepCounter, batching, logEachStep=logEachStep, logGeneralInfo=logGeneralInfo, useConsecutiveSteps=useConsecutiveSteps)
         except KeyboardInterrupt:
             print(f"Simulation interrupted by user after {runCounter} runs.")
             break
@@ -337,14 +383,18 @@ if __name__ == "__main__":
         runCounter += 1
 
         if runCounter % 100 == 0:
-            rlAgent.saveModels(f"flightData/{trainingName}/models")
+            rlAgent.saveModels(f"flightData/{trainingName}/models", runCounter)
             print("Models saved.")
 
         resetTargetAndMissile()
-        flightLogger.reset(unique_name=trainingName, run_id=runCounter, map=enviroment.map)
+        if logEachStep:
+            flightLogger.reset(unique_name=trainingName, run_id=runCounter, map=enviroment.map)
         # enviroment.resetMap()
 
-    flightLogger.deleteLastFlightLog()
-    flightLogger.exit()
+    if logEachStep:
+        flightLogger.deleteLastFlightLog()
+
+    if logEachStep or logGeneralInfo:
+        flightLogger.exit()
 
     print("Simulation finished.")

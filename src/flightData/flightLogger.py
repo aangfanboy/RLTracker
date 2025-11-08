@@ -27,7 +27,7 @@ except Exception:
 class FlightLogger:
     CREATED: bool = False
 
-    def reset(self, unique_name: str, run_id: int, map: floatMatrix) -> None:
+    def reset(self, unique_name: str, run_id: int, map: floatMatrix = None) -> None:
         # Close any existing loggers
         self.exit()
         # Re-initialize
@@ -40,7 +40,7 @@ class FlightLogger:
         except Exception:
             print(f"Failed to delete flight log directory {self.origin}")
 
-    def __init__(self, unique_name: str, run_id: int, map: floatMatrix) -> None:
+    def __init__(self, unique_name: str, run_id: int, map: floatMatrix = None) -> None:
         origin = f"flightData/{unique_name}/run_{run_id}"
         os.makedirs(origin, exist_ok=True)
         self.origin = origin
@@ -119,7 +119,7 @@ class FlightLogger:
         except Exception:
             self.tb_writer = None
 
-        if not os.path.exists(self.map_file):
+        if map is not None and not os.path.exists(self.map_file):
             np.save(self.map_file, map)
 
         # counters used for tensorboard step indices
@@ -127,7 +127,20 @@ class FlightLogger:
         self.iLossLog = 0
         self.iCommandsLog = 0
 
-    def addReward(self, timeFloat: float, reward: float, averageReward: float = 0.0, averageCriticLoss: float = 0.0, averageActorLoss: float = 0.0, averageTemperatureLoss: float = 0.0, averageTemperature: float = 0.0, n_bounced: int = 0, discountedSum: float = 0.0):
+    def addTestResults(self, testStep: int, successRate: float, failuresByBounce: int, failuresByTimeout: int, averageReward: float = 0.0, averageDiscountedSum: float = 0.0) -> None:
+        if self.general_tb_writer is not None:
+            try:
+                step = int(self.iFlightLog)
+                if hasattr(self.general_tb_writer, 'add_scalar'):
+                    self.general_tb_writer.add_scalar('test/success_rate', float(successRate), testStep)
+                    self.general_tb_writer.add_scalar('test/failures_by_bounce', float(failuresByBounce), testStep)
+                    self.general_tb_writer.add_scalar('test/failures_by_timeout', float(failuresByTimeout), testStep)
+                    self.general_tb_writer.add_scalar('test/average_reward', float(averageReward), testStep)
+                    self.general_tb_writer.add_scalar('test/average_discounted_sum', float(averageDiscountedSum), testStep)
+            except Exception:
+                pass
+
+    def addReward(self, timeFloat: float, reward: float, averageReward: float = 0.0, averageCriticLoss: float = 0.0, averageActorLoss: float = 0.0, averageTemperatureLoss: float = 0.0, averageTemperature: float = 0.0, n_bounced: int = 0, discountedSum: float = 0.0, actionSmallerOddForPID: float = 0.5) -> None:
         if self.general_tb_writer is not None:
             try:
                 step = int(self.iFlightLog)
@@ -140,6 +153,7 @@ class FlightLogger:
                     self.general_tb_writer.add_scalar('loss/average_temperature', float(averageTemperature), timeFloat)
                     self.general_tb_writer.add_scalar('loss/number_bounced', float(n_bounced), timeFloat)
                     self.general_tb_writer.add_scalar('reward/discounted_sum', float(discountedSum), timeFloat)
+                    self.general_tb_writer.add_scalar('settings/action_smaller_odd_for_pid', float(actionSmallerOddForPID), timeFloat)
             except Exception:
                 pass
 
@@ -187,7 +201,7 @@ class FlightLogger:
                 # Don't let TB logging break main flow
                 pass
 
-    def lossLog(self, timeFloat: float, actorLoss: float, criticLoss1: float, criticLoss2: float, temperatureLoss: float):
+    def lossLog(self, timeFloat: float, actorLoss: float, criticLoss1: float, criticLoss2: float, temperatureLoss: float, temperature: float = 0.0):
         # increment counter (used as tensorboard step)
         self.iLossLog += 1
 
@@ -201,6 +215,7 @@ class FlightLogger:
                     self.tb_writer.add_scalar('loss/critic_loss1', float(criticLoss1), step)
                     self.tb_writer.add_scalar('loss/critic_loss2', float(criticLoss2), step)
                     self.tb_writer.add_scalar('loss/temperature_loss', float(temperatureLoss), step)
+                    self.tb_writer.add_scalar('loss/temperature', float(temperature), step)
             except Exception:
                 pass
 

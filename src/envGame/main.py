@@ -29,11 +29,11 @@ class Enviroment:
         self.point_coordinate: floatMatrix = self.missile.position
         self.target_coordinate: floatMatrix = self.target.position
 
-    def put_inside_bounds(self) -> tuple[bool, float, float, float]:
+    def put_inside_bounds(self) -> bool:
         coordinate: floatMatrix = self.missile.position
         isInside: bool = self.check_in_bounds(coordinate)
         if isInside:
-            return False, 1, 1, 1  # No adjustment needed
+            return False
 
         outsideX = 1
         outsideY = 1
@@ -42,23 +42,23 @@ class Enviroment:
         x, y, z = coordinate.flatten()
         xp = np.clip(x, 1, self.map.shape[0] - 1)
         yp = np.clip(y, 1, self.map.shape[1] - 1)
-        zp = max(z, self.maxAllowableHeight)
+        zp = np.clip(z, 1, self.maxAllowableHeight - 1)
         
-        if x != xp: outsideX = -.01
-        if y != yp: outsideY = -.01
-        if z != zp: outsideZ = -.01
+        if x != xp: outsideX = -.0
+        if y != yp: outsideY = -.0
+        if z != zp: outsideZ = -.0
 
         self.missile.position = np.array([[xp], [yp], [zp]])
         self.missile.velocity = np.array([[self.missile.velocity[0, 0] * outsideX],
                                           [self.missile.velocity[1, 0] * outsideY],
                                           [self.missile.velocity[2, 0] * outsideZ]])
         
-        return True, outsideX, outsideY, outsideZ
+        return True
         
 
     def check_in_bounds(self, coordinate: floatMatrix) -> bool:
         x, y, z = coordinate.flatten()
-        if 0 <= x < self.map.shape[0] and 0 <= y < self.map.shape[1] and z >= 0:
+        if 0 <= x < self.map.shape[0] and 0 <= y < self.map.shape[1] and 0 <= z < self.maxAllowableHeight:
             return True
         return False
     
@@ -69,7 +69,7 @@ class Enviroment:
 
     def check_collision_with_target(self, distance_threshold: float = 2.0, positionBefore: floatMatrix = None) -> bool:
         """interpolate between previous and current position to check for collision with target"""
-        steps = 10
+        steps = 20
         for i in range(steps + 1):
             interp_position = positionBefore + (self.missile.position - positionBefore) * (i / steps)
             distance = np.linalg.norm(interp_position - self.target.position)

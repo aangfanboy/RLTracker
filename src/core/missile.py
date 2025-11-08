@@ -85,6 +85,8 @@ class Missile:
             self.velocity, self.angularVelocity, dt
         )
 
+        self.velocity = np.clip(self.velocity, -self.constraints.MAX_VELOCITY, self.constraints.MAX_VELOCITY)
+
 if __name__ == "__main__":
     # Example usage
     missile = Missile(

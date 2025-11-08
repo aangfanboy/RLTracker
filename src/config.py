@@ -28,6 +28,7 @@ class MissileConfig(ACConfig):
         MAX_P: float = 0.5 # @unit rad/s, @type float
         MAX_Q: float = 0.5 # @unit rad/s, @type float
         MAX_R: float = 0.5 # @unit rad/s, @type float
+        MAX_VELOCITY: float = 1000.0  # @unit m/s, @type float
 
 class TargetConfig(ACConfig):
     MASS: float = 1000.0  # @unit kg, @type float
